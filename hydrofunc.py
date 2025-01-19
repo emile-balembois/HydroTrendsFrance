@@ -1430,6 +1430,7 @@ def raster_to_polygons(srcFile,dstFile,epsgCode,zName,zRestriction=None):
     #Import libraries
     
     from osgeo import gdal, osr
+    gdal.AllRegister()
     gdal.UseExceptions()
     import geopandas as gpd
     import pandas as pd
