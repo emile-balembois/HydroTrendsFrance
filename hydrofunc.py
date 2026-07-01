@@ -146,12 +146,20 @@ def request_osm_feature(bbox,bboxEPSG,tags,dstFile):
 
     #Request 
     lbbox = newbbox.split()
-    fbbox = [float(coord) for coord in lbbox]
-    obbox = [fbbox[3],fbbox[1],fbbox[2],fbbox[0]]
-    tbbox = tuple(obbox)
+    xmin, ymin, xmax, ymax = [float(coord) for coord in lbbox]
+    north = ymax
+    south = ymin
+    east = xmax
+    west = xmin
     
     try:
-        gdf = ox.features.features_from_bbox(bbox=tbbox, tags=tags)
+        try:
+            gdf = ox.features.features_from_bbox(north, south, east, west, tags=tags)
+        except TypeError:
+            try:
+                gdf = ox.features.features_from_bbox((west, south, east, north), tags=tags)
+            except TypeError:
+                gdf = ox.features.features_from_bbox(bbox=(north, south, east, west), tags=tags)
         
         gdf.set_crs(epsg=4326, inplace=True)
         #Keep only the geometry column and the POINT-geometry rows and the column corresponding to the feature called in 'tags' parameter
@@ -182,7 +190,7 @@ def request_osm_feature(bbox,bboxEPSG,tags,dstFile):
 def request_locations_hubeau(bbox,dstFile,operating,tRange=None):
 
     """
-    Makes a request to https://hubeau.eaufrance.fr/api/v1/hydrometrie/referentiel/stations? and returns a geoDataFrame with station codes
+    Makes a request to https://hubeau.eaufrance.fr/api/v2/hydrometrie/referentiel/stations? and returns a geoDataFrame with station codes
     with colomuns ['code_station','date_ouverture_station','date_fermeture_station','geometry']
 
     bbox: coordinates as a string "xmin ymin xmax ymax" to define the request's spatial extent [string]
@@ -208,8 +216,15 @@ def request_locations_hubeau(bbox,dstFile,operating,tRange=None):
     
     print("Request to hubeau.eaufrance.fr")
     size = 10000 #maximum depth of the json response from hubeau.eaufrance.fr 
-    url = f"https://hubeau.eaufrance.fr/api/v1/hydrometrie/referentiel/stations?size={size}&pretty&bbox={xmin},{ymin},{xmax},{ymax}"
-    r = requests.get(url, allow_redirects=True)
+    url = "https://hubeau.eaufrance.fr/api/v2/hydrometrie/referentiel/stations"
+    params = {
+        "size": size,
+        "pretty": "",
+        "bbox": f"{xmin},{ymin},{xmax},{ymax}",
+    }
+    r = requests.get(url, params=params, allow_redirects=True)
+    if r.status_code not in (200, 206):
+        raise Exception(f"In request to {r.url} :\nstatus code = {r.status_code}")
     
     #Convert data from json to dataframe
     
@@ -310,19 +325,22 @@ def requestBackend_observations_hubeau(stationCode,start,end):
 
     #Request observations
     
-    grandeur = "QmJ"
+    grandeur = "QmnJ"
     size = 10000
     
-    url = f"https://hubeau.eaufrance.fr/api/v1/hydrometrie/obs_elab?\
-size={str(size)}&pretty&\
-code_entite={str(stationCode)}&\
-grandeur_hydro_elab={grandeur}&\
-date_debut_obs_elab={str(start)}&\
-date_fin_obs_elab={str(end)}"
-    
-    r = requests.get(url, allow_redirects=True)
+    url = "https://hubeau.eaufrance.fr/api/v2/hydrometrie/obs_elab"
+    params = {
+        "size": size,
+        "pretty": "",
+        "code_entite": str(stationCode),
+        "grandeur_hydro_elab": grandeur,
+        "date_debut_obs_elab": str(start),
+        "date_fin_obs_elab": str(end),
+    }
+
+    r = requests.get(url, params=params, allow_redirects=True)
         
-    if  r.status_code != 503:
+    if  r.status_code in (200, 206):
     
         data = json.loads(r.content)
         df_response = pd.json_normalize(data['data'])
@@ -337,7 +355,7 @@ date_fin_obs_elab={str(end)}"
             del df_response
         
         else:
-            print(f"null response from url {url}")
+            print(f"null response from url {r.url}")
             
             frames = {'code_station':[str(stationCode)],
                       'date_obs_elab':[np.float32(np.nan)],
@@ -347,7 +365,7 @@ date_fin_obs_elab={str(end)}"
             dfc = pd.DataFrame(frames)
     
     else:
-        print(f"error 503 from url {url}")
+        print(f"error {r.status_code} from url {r.url}")
         
         frames = {'code_station':[str(stationCode)],
                       'date_obs_elab':[np.float32(np.nan)],
@@ -364,7 +382,7 @@ date_fin_obs_elab={str(end)}"
 def requestFrontend_observations_hubeau(srcFile,dstFile,tRange=None):
 
     """
-    Makes a request to https://hubeau.eaufrance.fr/api/v1/hydrometrie/obs_elab? and returns a geoDataFrame with station observations (Mean Daily Flows)
+    Makes a request to https://hubeau.eaufrance.fr/api/v2/hydrometrie/obs_elab? and returns a geoDataFrame with station observations (Mean Daily Flows)
     with colomuns ['code_station','date_obs_elab','resultat_obs_elab','geometry']
     
     tRange [optionnal] [list]: default is None, meaning their is no time range specified (sation observations are extracted from each station's openning date to present date or to the station's closing date). If tRange has both values specified, e.g. ["yyyy-mm-dd","yyyy-mm-dd"], values are retrieved for this time range.
@@ -1434,10 +1452,14 @@ def raster_to_polygons(srcFile,dstFile,epsgCode,zName,zRestriction=None):
     import geopandas as gpd
     import pandas as pd
     import os
+    import shutil
+    import subprocess
+    import sys
 
-    # Full path to gdal_polygonize.py & python.exe
-    gdal_polygonize_path = os.path.normpath(r"C:/Users/ITR2276/AppData/Local/miniconda3/envs/pcraster/Scripts/gdal_polygonize.py")
-    python_path = os.path.normpath(r"C:/Users/ITR2276/AppData/Local/miniconda3/envs/pcraster/python.exe")
+    gdal_polygonize_path = shutil.which("gdal_polygonize.py") or shutil.which("gdal_polygonize")
+    if gdal_polygonize_path is None:
+        raise FileNotFoundError("gdal_polygonize.py was not found in PATH.")
+    gdal_polygonize_cmd = [sys.executable, gdal_polygonize_path] if gdal_polygonize_path.endswith(".py") else [gdal_polygonize_path]
 
     #Call function relio.split_singleband() to split srcFile raster into multiple rasters with unique pixel value
     max = split_singleband(srcFile,epsgCode,zRestriction) #dstFile = f"{srcFile[:-4]}_PixelValueIs{#}.tif"
@@ -1452,8 +1474,8 @@ def raster_to_polygons(srcFile,dstFile,epsgCode,zName,zRestriction=None):
 
             rasterFile = os.path.normpath(rf"{srcFile[:-4]}_PixelValueIs{str(val)}.tif")
             tmpVectorFile = os.path.normpath(rf"{srcFile[:-4]}_PixelValueIs{str(val)}.gpkg")
-            cmd = f'{python_path} {gdal_polygonize_path} {rasterFile} -overwrite -b 1 -f "GPKG" {tmpVectorFile} OUTPUT {zName}'
-            os.system(cmd)
+            cmd = gdal_polygonize_cmd + [rasterFile, "-overwrite", "-b", "1", "-f", "GPKG", tmpVectorFile, "OUTPUT", zName]
+            subprocess.run(cmd, check=True)
             #The above gdal command returns a vector file with multiple entities: one polygon for the envelop, and multiple polygons where region is broken
             #So we remove the envelop (catch_id=0) polygon mnd merge the others 
             tmpVectorLoad = gpd.read_file(tmpVectorFile)
@@ -1494,8 +1516,8 @@ def raster_to_polygons(srcFile,dstFile,epsgCode,zName,zRestriction=None):
     
             rasterFile = os.path.normpath(rf"{srcFile[:-4]}_PixelValueIs{str(val)}.tif")
             tmpVectorFile = os.path.normpath(rf"{srcFile[:-4]}_PixelValueIs{str(val)}.gpkg")
-            cmd = f'{python_path} {gdal_polygonize_path} {rasterFile} -overwrite -b 1 -f "GPKG" {tmpVectorFile} OUTPUT {zName}'
-            os.system(cmd)
+            cmd = gdal_polygonize_cmd + [rasterFile, "-overwrite", "-b", "1", "-f", "GPKG", tmpVectorFile, "OUTPUT", zName]
+            subprocess.run(cmd, check=True)
             #The above gdal command returns a vector file with multiple entities: one polygon for the envelop, and multiple polygons where region is broken
             #So we remove the envelop (catch_id=0) polygon mnd merge the others 
             tmpVectorLoad = gpd.read_file(tmpVectorFile)

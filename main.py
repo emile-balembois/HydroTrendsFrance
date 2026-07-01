@@ -43,7 +43,7 @@ globstart0 = datetime.datetime.now()
 ##################
 
 #Area of Interest
-AoI_filePath = "C:/Users/ITR2276/Documents/EAU_CODE/HYDRO/Emprises/Emprise_Adapte.gpkg" #path to file with extension
+AoI_filePath = os.environ.get("HYDROTRENDS_AOI_FILE", "path/to/area_of_interest.gpkg") #path to file with extension
 AoI_fileIsRaster = False #False if AoI is a vector file (.shp, .gpkg...); True if AoI is a raster file (.tif...)
 AoI_EPSG = 4326 #ESPG code in which AoI_filePath is projected [int] e.g. 4326 #WARNING: !!has been developped with EPSG:4326 only, hence may not work with other EPSGs at this stage!!
 
@@ -268,12 +268,18 @@ if runModule1 is True:
     dst = os.path.normpath(rf"{tmpDirectory}/accuflux_geq{str(accThreshold)}.tif")
     calc = f"numpy.where(A>{np.float32(accThreshold)},A,numpy.nan)" #not zero for False case to further apply log10 function for vizualisation purpose
     
-    # Duli : Full path to gdal_calc.py & python.exe
-    gdal_calc_path = os.path.normpath(r"C:/Users/ITR2276/AppData/Local/miniconda3/envs/pcraster/Scripts/gdal_calc.py")
-    python_path = os.path.normpath(r"C:/Users/ITR2276/AppData/Local/miniconda3/envs/pcraster/python.exe")
+    import shutil
+    import subprocess
+    import sys
+
+    gdal_calc_path = shutil.which("gdal_calc.py") or shutil.which("gdal_calc")
+    if gdal_calc_path is None:
+        raise FileNotFoundError("gdal_calc.py was not found in PATH.")
+
     nd = 'none'
-    cmd = '{python_path} {gdal_calc_path} --overwrite --calc "{calc}" --format GTiff --type Float32 --extent=intersect --NoDataValue={nd} -A {src} --A_band 1 --outfile {dst}'.format(python_path=python_path, gdal_calc_path=gdal_calc_path, nd=nd,src=src,dst=dst,calc=calc) #new scalar raster intersecting the AoI
-    os.system(cmd)
+    gdal_calc_cmd = [sys.executable, gdal_calc_path] if gdal_calc_path.endswith(".py") else [gdal_calc_path]
+    cmd = gdal_calc_cmd + ["--overwrite", "--calc", calc, "--format", "GTiff", "--type", "Float32", "--extent=intersect", f"--NoDataValue={nd}", "-A", src, "--A_band", "1", "--outfile", dst]
+    subprocess.run(cmd, check=True)
     del src, dst
 
     print("Generate subcatchments of all stations retrieved")
@@ -953,7 +959,7 @@ if runModuleBNPE is True:
 
     print(f"AoI_bbox : {AoI_bbox}")
 
-    water_type = ['CONT'] #The water type can be : 'CONT' for continental, 'SOUT' for underground, 'LIT' for maritim
+    water_type = 'CONT' #The water type can be : 'CONT' for continental, 'SOUT' for underground, 'LIT' for maritim
     year_list = [a for a in range(timeRange[0], timeRange[1]+1)] #adapt time_range to BNPE.py functions
 
     try :
@@ -975,7 +981,7 @@ if runModuleBNPE is True:
 
         print("Create debits_naturels layer")
         #Define path
-        polygone_path = os.path.normpath(rf"{analysisDirectory}/stations_observations_mmf_average_20122021_subcatchments.gpkg")
+        polygone_path = os.path.normpath(rf"{analysisDirectory}/stations_observations_mmf_average_{str(timeRange[0])}{str(timeRange[1])}_subcatchments.gpkg")
         points_path = BNPE_file
         output_path = os.path.normpath(rf"{analysisDirectory}/subcatchments_mmf_withdrawals.gpkg")
         debits_naturels_path = os.path.normpath(rf"{analysisDirectory}/debits_naturels.gpkg")
@@ -986,8 +992,9 @@ if runModuleBNPE is True:
         #Calculate Natural Flows
         subcatchment_withdraw = output_path
         debits_naturels = gpd.read_file(subcatchment_withdraw)
-        debits_naturels['debits naturels'] = debits_naturels['MeanAnnualFlow_20122021'] + debits_naturels['Prel_Total']
-        debits_naturels['limite planetaire'] = (debits_naturels['debits naturels']-debits_naturels['MeanAnnualFlow_20122021'])/debits_naturels['debits naturels']
+        mean_annual_flow = f"MeanAnnualFlow_{str(timeRange[0])}{str(timeRange[1])}"
+        debits_naturels['debits naturels'] = debits_naturels[mean_annual_flow] + debits_naturels['Prel_Total']
+        debits_naturels['limite planetaire'] = (debits_naturels['debits naturels']-debits_naturels[mean_annual_flow])/debits_naturels['debits naturels']
 
         #Export debits_naturels layer for QGIS use purpose
         debits_naturels.to_file(debits_naturels_path, driver='GPKG')

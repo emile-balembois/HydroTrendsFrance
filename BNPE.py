@@ -1,5 +1,4 @@
-
-import pathlib
+from collections import defaultdict
 import requests
 import json
 
@@ -62,9 +61,16 @@ def extract_Vectorbbox_list(srcFile) -> list:
 def get_code_ouvrage(obj):
     return obj['properties']['code_ouvrage']
 
-def binary_search(chroniques, x) -> dict:
+def _as_list(value):
+    if value is None or isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+def binary_search(arr, x) -> dict:
     low = 0
-    high = len(chroniques) - 1
+    high = len(arr) - 1
     mid = 0
     D = {}
     while low <= high:
@@ -72,40 +78,46 @@ def binary_search(chroniques, x) -> dict:
         mid = (high + low) // 2
  
         # If x is greater, ignore left half
-        if chroniques[mid]['properties']['code_ouvrage'] < x:
+        if arr[mid]['properties']['code_ouvrage'] < x:
             low = mid + 1
  
         # If x is smaller, ignore right half
-        elif chroniques[mid]['properties']['code_ouvrage'] > x:
+        elif arr[mid]['properties']['code_ouvrage'] > x:
             high = mid - 1
 
         # means x is present at mid
         else:
             minimum = mid
             maximum = mid
-            D['code_usage'] = [chroniques[mid]['properties']['code_usage']]
 
-            while minimum-1 >= 0 and chroniques[minimum-1]['properties']['code_ouvrage'] == x :
+            while minimum-1 >= 0 and arr[minimum-1]['properties']['code_ouvrage'] == x :
                 minimum -= 1
-            while maximum+1 <= len(chroniques)-1 and chroniques[maximum+1]['properties']['code_ouvrage'] == x :
+            while maximum+1 <= len(arr)-1 and arr[maximum+1]['properties']['code_ouvrage'] == x :
                 maximum += 1
             else :
                 for n in range(minimum, maximum+1) :
-                    D[f"{chroniques[n]['properties']['annee']}"] = chroniques[n]['properties']['volume']
-                    if chroniques[n]['properties']['code_usage'] not in D['code_usage'] :
-                        D['code_usage'].append(chroniques[n]['properties']['code_usage'])
+                    props = arr[n]['properties']
+                    if props.get('annee') is not None and props.get('volume') is not None:
+                        key = f"{props['annee']}"
+                        D[key] = D.get(key, 0) + props['volume']
+                    usage = props.get('code_usage') or props.get('code_usage_second_niveau')
+                    if usage is not None:
+                        D.setdefault('code_usage', [])
+                        if usage not in D['code_usage']:
+                            D['code_usage'].append(usage)
                 return D
  
     # If we reach here, then the element was not present
     return {}
     
-def ouvrages(milieu : list, bbox = None, depart = None, format = "geojson", size = 20000) -> json :
+def ouvrages(milieu, bbox = None, depart = None, format = "geojson", size = 20000) -> json :
 
     """
     Request to "https://hubeau.eaufrance.fr/api/v1/prelevements/referentiel/ouvrages", to retrieve all installations interfering with natural water flows, within the AoI
     Return a geojson that can be directly used in QGIS.
 
-    milieu : the water type studied, can be 'CONT' for surface water, 'SOUT' for underground water, 'LIT' for sea or oceanic water.
+    milieu : the water type studied, can be 'CONT' for surface water, 'SOUT' for underground water,
+    'LIT' for sea or oceanic water, or a list of those values.
     bbox : spatial extent of the Area of Interest = [xmin, ymin, xmax, ymax]
     depart : department of interest, only if bbox = None. e.g. ['69', '38', '42', '01']
     format : format of created file. "geojson" by default. Can be "json" or "geojson".
@@ -116,7 +128,7 @@ def ouvrages(milieu : list, bbox = None, depart = None, format = "geojson", size
 
     params = {
         'code_departement': depart,
-        'code_type_milieu' : milieu,
+        'code_type_milieu' : _as_list(milieu),
         'format': format,
         'size': size
     
@@ -152,20 +164,18 @@ def chroniques(annees : list, bbox = None, depart = None, ouv_list = None, forma
 
     annees : years of interest. e.g. [2012, 2013, 2014, 2020]
     bbox : spatial extent of the Area of Interest = [xmin, ymin, xmax, ymax]
-    depart : department of interest, if bbox = None. e.g. ['69', '38', '42', '01']
+    depart : department of interest, only if bbox = None. e.g. ['69', '38', '42', '01']
     ouv_list : to request on specific installations. list of installation id with max size of 200.
     format : format of created file. "geojson" by default. Can be "json" or "geojson".
     size : number of data retrieved. max size = 20000.
     """
 
     link = f"https://hubeau.eaufrance.fr/api/v1/prelevements/chroniques"
-    fields = ['code_ouvrage', 'nom_ouvrage','latitude', 'longitude', 'code_type_milieu', 'code_usage', 'nom_commune', 'code_commune_insee', 'annee', 'volume']
     params = {
         'annee' : annees,
         'format': format,
         'size': size,
-        'code_ouvrage': ouv_list,
-        'fields': fields
+        'code_ouvrage': ouv_list
     }
 
     if type(bbox) is list :
@@ -249,7 +259,8 @@ def multi_chroniques(ouv_multi : list, annees : list, bbox = None, depart = None
 def chroniques_ouvrages(path : str, Chro : json, Ouv : json, annees : list) -> json:
     
     """
-    Coupling chroniques response and ouvrages response to have a geojson compliant with further analysis in QGIS with volumes per year associated for every installation.
+    Coupling chroniques response and ouvrages response to have a geojson compliant with further
+    analysis in QGIS with volumes per year associated for every installation.
     Download a geojson that can be directly used in QGIS (at the given path).
 
     path : path to the file to write, or overwrite, with .geojson extension
@@ -258,43 +269,88 @@ def chroniques_ouvrages(path : str, Chro : json, Ouv : json, annees : list) -> j
     annees : years of interest, which will appear in the geojson result. e.g. [2012, 2013, 2014, 2020]
     """
     try :
-        if path[-8:] != '.geojson' :
+        if not path.endswith('.geojson') :
             raise Exception("In chroniques_ouvrages function : Path extension must be .geojson !")
 
-        C_f = sorted(Chro['features'], key=get_code_ouvrage)
+        chroniques_by_ouvrage = defaultdict(list)
+        for feat in Chro['features']:
+            props = feat['properties']
+            code_ouvrage = props.get('code_ouvrage')
+            if code_ouvrage is not None:
+                chroniques_by_ouvrage[code_ouvrage].append(props)
 
         for o in Ouv['features'] :
 
-            AnnualMMF = 0
-            nb_a = 0
+            props_ouvrage = o['properties']
             code_o = get_code_ouvrage(o)
-            D = binary_search(C_f, code_o)
+            chroniques_ouvrage = chroniques_by_ouvrage.get(code_o, [])
 
-            if "code_usage" in D :
-                o['properties']['code_usage'] = D['code_usage'][0]
+            volumes_by_year = {}
+            usage_codes = set()
+            usage_labels = set()
+
+            for key in ('code_usage', 'code_usage_second_niveau'):
+                values = _as_list(props_ouvrage.get(key))
+                if values is not None:
+                    usage_codes.update(str(value) for value in values if value is not None)
+
+            for key in ('libelle_usage', 'libelle_usage_second_niveau'):
+                values = _as_list(props_ouvrage.get(key))
+                if values is not None:
+                    usage_labels.update(str(value) for value in values if value is not None)
+
+            for props in chroniques_ouvrage:
+                annee = props.get('annee')
+                volume = props.get('volume')
+                if annee is not None and volume is not None:
+                    key = f"{annee}"
+                    volumes_by_year[key] = volumes_by_year.get(key, 0) + volume
+
+                for key in ('code_usage', 'code_usage_second_niveau'):
+                    values = _as_list(props.get(key))
+                    if values is not None:
+                        usage_codes.update(str(value) for value in values if value is not None)
+
+                for key in ('libelle_usage', 'libelle_usage_second_niveau'):
+                    values = _as_list(props.get(key))
+                    if values is not None:
+                        usage_labels.update(str(value) for value in values if value is not None)
+
+            AnnualMMF = 0.0
+            nb_a = 0
 
             for a in annees :
-                if f"{a}" in D :
+                key = f"{a}"
+                if key in volumes_by_year :
                     nb_a += 1
-                    o['properties'][f"{a} AnnualFlow"] = D[f"{a}"]
-                    AnnualMMF += D[f"{a}"]
+                    o['properties'][f"{a} AnnualFlow"] = volumes_by_year[key]
+                    AnnualMMF += (volumes_by_year[key] / 12) / 2629.8
 
                 else :
                     o['properties'][f"{a} AnnualFlow"] = None
+
             if nb_a != 0 :
-                #Mean over the years
                 AnnualMMF = AnnualMMF/nb_a
-
-                #Monthly mean
-                AnnualMMF = AnnualMMF/12
-
-                #m3/month to L/s
-                AnnualMMF = AnnualMMF/2629.8
-
                 o['properties']['AnnualMMF'] = AnnualMMF
+            else:
+                o['properties']['AnnualMMF'] = None
 
-        with open(path, 'w') as f :
-            json.dump(Ouv, f)
+            if usage_codes:
+                usage_codes_list = sorted(usage_codes)
+                usage_codes_text = ";".join(usage_codes_list)
+                o['properties'].setdefault('code_usage', usage_codes_list[0])
+                o['properties']['code_usage_list'] = usage_codes_text
+                o['properties']['code_prel'] = usage_codes_text
+
+            if usage_labels:
+                usage_labels_list = sorted(usage_labels)
+                usage_labels_text = ";".join(usage_labels_list)
+                o['properties'].setdefault('libelle_usage', usage_labels_list[0])
+                o['properties']['libelle_usage_list'] = usage_labels_text
+                o['properties']['libelle_prel'] = usage_labels_text
+
+        with open(path, 'w', encoding='utf-8') as f :
+            json.dump(Ouv, f, ensure_ascii=False, indent=2)
         
         return Ouv
 
@@ -348,7 +404,7 @@ def cut_function(territory_path : str, subcatchments_path : str) :
     return result
 
 #%% MAIN PART
-# AoI_filePath = "C:/Users/ITR2276/Documents/EAU_CODE/HYDRO/Emprises/Emprise_Adapte.gpkg" #path to file with extension
+# AoI_filePath = "path/to/area_of_interest.gpkg" #path to file with extension
 # AoI_bbox = extract_Vectorbbox_list(AoI_filePath)
 # print(f"AoI_bbox : {AoI_bbox}")
 
@@ -363,7 +419,7 @@ def cut_function(territory_path : str, subcatchments_path : str) :
 
 # Chro_multi = multi_chroniques(Ouv_multi, annees, bbox = AoI_bbox)
 
-# result_path = "C:/Users/ITR2276/Documents/EAU_CODE/HYDRO/CODE_FINAL/data/BNPE_all.geojson"
+# result_path = "path/to/BNPE_all.geojson"
 
 # chroniques_ouvrages(result_path, Chro_multi, Ouv, annees)
 
